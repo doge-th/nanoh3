@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Test suite
+        run: python -m pytest -q
+      - name: Memory budget must fit 8 GiB
+        run: python -m nanoh3.engine.budget --profile all
+      - name: Teacher licence guard must reject MiniMax-H3
+        run: |
+          if python scripts/prepare_teacher_data.py --repo MiniMaxAI/MiniMax-H3 --out /tmp/h3; then
+            echo "licence guard failed to reject a restricted teacher"; exit 1
+          fi
+      - name: Smoke: import the package
+        run: python -c "import nanoh3; print(nanoh3.__version__)"

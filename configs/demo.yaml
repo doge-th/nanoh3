@@ -1,0 +1,53 @@
+# Demonstration configuration: trains and samples on a laptop CPU/MPS in minutes.
+# Not a quality model. Its job is to prove the pipeline end to end.
+name: demo
+out_dir: runs/demo
+device: auto
+seed: 0
+
+frames: 9
+size: 64
+batch_size: 4
+dataset_size: 256
+
+vae_steps: 200
+vae_lr: 3.0e-4
+vae_kl_weight: 1.0e-4
+
+dit_steps: 400
+dit_lr: 3.0e-4
+text_lr: 3.0e-4
+text_loss_weight: 0.05
+
+log_every: 25
+save_every: 200
+grad_clip: 1.0
+preview_every: 100
+
+dit:
+  latent_channels: 16
+  patch_size: 2
+  hidden_size: 192
+  depth: 8
+  num_heads: 6
+  mlp_ratio: 4.0
+  text_dim: 128
+  max_text_len: 77
+  qk_norm: true
+
+vae:
+  in_channels: 3
+  base_channels: 16
+  latent_channels: 16
+  channel_multipliers: [1, 2, 2, 4, 4, 4]
+  num_res_blocks: 1
+  spatial_compression: 8
+  temporal_compression: 4
+  groups: 8
+
+text:
+  vocab_size: 256
+  width: 128
+  layers: 2
+  heads: 4
+  max_len: 77

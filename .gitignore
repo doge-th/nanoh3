@@ -1,0 +1,29 @@
+# checkpoints and generated media
+runs/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.mp4
+!docs/assets/*.mp4
+
+# teacher data (licence-dependent, never commit)
+data/teacher/
+out.mp4
+outputs/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/

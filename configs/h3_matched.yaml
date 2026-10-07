@@ -1,0 +1,56 @@
+# Geometry matched to MiniMax-H3: 16x spatial / 4x temporal VAE with 24 latent
+# channels and a 2x patchifier, i.e. the same effective 32x spatial reduction per
+# video token that H3 uses (patch_size [1,2,2] over f16t4d24 latents).
+#
+# This is the config to use if you want NanoH3 to see the same token grid as H3 at
+# a given canvas, which makes transfer of a pretrained H3 denoiser (where the
+# licence allows it) or a controlled ablation far easier.
+name: h3-matched
+out_dir: runs/h3-matched
+device: auto
+seed: 0
+
+frames: 17
+size: 256
+batch_size: 1
+dataset_size: 200000
+
+vae_steps: 80000
+vae_lr: 2.0e-4
+
+dit_steps: 150000
+dit_lr: 2.0e-4
+text_lr: 2.0e-4
+text_loss_weight: 0.02
+
+log_every: 100
+save_every: 2000
+grad_clip: 1.0
+
+dit:
+  latent_channels: 24
+  patch_size: 2
+  hidden_size: 768
+  depth: 24
+  num_heads: 12
+  mlp_ratio: 4.0
+  text_dim: 512
+  max_text_len: 77
+  qk_norm: true
+
+vae:
+  in_channels: 3
+  base_channels: 64
+  latent_channels: 24
+  channel_multipliers: [1, 2, 3, 4, 4, 4, 4]   # 6 downsamples = 16x spatial + 4x temporal
+  num_res_blocks: 2
+  spatial_compression: 16
+  temporal_compression: 4
+  groups: 8
+
+text:
+  vocab_size: 256
+  width: 512
+  layers: 6
+  heads: 8
+  max_len: 77

@@ -13,6 +13,7 @@ dataset_size: 256
 vae_steps: 800
 vae_lr: 3.0e-4
 vae_kl_weight: 1.0e-4
+vae_temporal_weight: 2.0
 
 dit_steps: 3000
 dit_lr: 3.0e-4

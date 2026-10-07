@@ -259,13 +259,16 @@ class NanoVAE(nn.Module):
         logvar = self._logvar(posterior)
         return 0.5 * (mean.pow(2) + logvar.exp() - 1.0 - logvar).mean()
 
-    def recon_loss(self, video: Tensor, kl_weight: float = 1e-4) -> Tuple[Tensor, dict]:
-        """L1 + multi-scale gradient + a small KL term.
+    def recon_loss(self, video: Tensor, kl_weight: float = 1e-4, temporal_weight: float = 2.0) -> Tuple[Tensor, dict]:
+        """L1 + multi-scale gradient + temporal gradient + a small KL term.
 
-        The KL weight is deliberately tiny: it only has to stop the variance head
-        from running away, which is a stability constraint rather than a desire
-        for a maximally compressed latent. Reconstruction uses the posterior mean
-        so the two loss terms are comparable.
+        The temporal term is not optional. Frame-to-frame differences in a video
+        are typically 10-30x smaller than per-pixel contrast, so plain L1 is
+        minimised by emitting a single averaged frame repeated N times -- the
+        decoder reaches a good loss while producing **no motion at all**. Measured
+        before this term existed: reconstruction frame-to-frame delta of exactly
+        0.0 on clips whose latents clearly varied over time. Matching the temporal
+        gradient directly is what forces the decoder to animate.
         """
         posterior = self.encode(video)
         latent = posterior.chunk(2, dim=1)[0]
@@ -276,11 +279,18 @@ class NanoVAE(nn.Module):
             a = F.avg_pool3d(video, m, m)
             b = F.avg_pool3d(rec, m, m)
             grad = grad + F.l1_loss(a, b) / m
+        if video.shape[2] > 1:
+            d_rec = rec[:, :, 1:] - rec[:, :, :-1]
+            d_ref = video[:, :, 1:] - video[:, :, :-1]
+            temporal = F.l1_loss(d_rec, d_ref)
+        else:
+            temporal = l1.new_zeros(())
         kl = self.kl_divergence(posterior)
-        total = l1 + 0.25 * grad + kl_weight * kl
+        total = l1 + 0.25 * grad + temporal_weight * temporal + kl_weight * kl
         return total, {
             "l1": float(l1.detach()),
             "grad": float(grad.detach()),
+            "temporal": float(temporal.detach()),
             "kl": float(kl.detach()),
             "rec": float(total.detach()),
         }

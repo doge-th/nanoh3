@@ -43,6 +43,7 @@ class TrainConfig:
     vae_steps: int = 300
     vae_lr: float = 2e-4
     vae_kl_weight: float = 1e-4
+    vae_temporal_weight: float = 2.0
     # dit
     dit_steps: int = 400
     dit_lr: float = 2e-4
@@ -141,7 +142,9 @@ def train_vae(cfg: TrainConfig, bundle: ModelBundle, device: torch.device, data:
     for step in range(1, cfg.vae_steps + 1):
         video, _ = data.batch(cfg.batch_size)
         video = video.to(device)
-        loss, metrics = bundle.vae.recon_loss(video, kl_weight=cfg.vae_kl_weight)
+        loss, metrics = bundle.vae.recon_loss(
+            video, kl_weight=cfg.vae_kl_weight, temporal_weight=cfg.vae_temporal_weight
+        )
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(bundle.vae.parameters(), cfg.grad_clip)

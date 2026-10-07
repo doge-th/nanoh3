@@ -67,9 +67,11 @@ at stride 2.
 **Normalisation.** `nn.GroupNorm` computes statistics over `(C/G, T, H, W)`, so
 its output at frame *t* depends on the mean and variance of the *entire clip*.
 Causal convolutions do not save you: the norm is a global mixing step wearing a
-convolution's clothes. `FrameGroupNorm` folds time into the batch dimension so
+convolution's clothes. `ClipOrFrameNorm` in its default `"frame"` mode folds time into the batch dimension so
 the statistics are per-frame. Measured leak before the fix: **0.032** on the
-encoder and **1.09** on the decoder. After: **0.0** on both, bit-identical.
+encoder and **1.09** on the decoder. After: ~1e-7 on both — float32 reassociation
+from the shape-dependent kernel choice, not leakage (the first latent frame is
+exactly 0).
 
 The decoder up-samples with `nearest` interpolation rather than transposed
 convolutions, because the interpolation is exact in shape and the transposed
@@ -172,11 +174,83 @@ a property of the code, not of a README sentence.
   schedules (12 and 3). For an 8 GB card that is two more models for no gain on
   the stated target.
 - **No adversarial or LPIPS loss on the VAE.** A proper autoencoder needs one.
-  L1 plus multi-scale gradient is enough to prove the pipeline and is honest about
-  what it is.
+  L1 plus multi-scale gradient plus a temporal term is enough to prove the
+  pipeline and is honest about what it is.
 - **No int4.** The SVDQuant/NVFP4 ladder is where H3's ecosystem went, and
   implementing a 4-bit kernel is a project of its own. int8 already leaves us at
   1.19 GiB of an 8 GiB budget; there is nothing to buy.
+
+---
+
+## The one thing that does not work yet: the demo model does not move
+
+Stated here rather than buried, because it is the most important thing to know
+before you extend this project.
+
+**Symptom.** The demo checkpoint generates a single frame and repeats it. Measured
+frame-to-frame delta on the output: `0.0` to `3e-4`, against `1e-2` to `3e-2` in
+the training clips. It is a video that does not move.
+
+**It is not an architecture bug.** Three checks:
+
+1. A randomly initialised decoder fed a time-varying latent *does* produce
+   non-zero temporal deltas (`0.0025` … `0.017`), so the temporal path through
+   interpolate → conv → norm is intact.
+2. The trained **encoder does** emit time-varying latents — but with the wrong
+   ratio: latent magnitude std **6.28** against a frame-to-frame delta of
+   **0.001–0.02**. It encodes "one big constant plus a whisper of motion".
+3. The decoder therefore faithfully reproduces a static frame, and the training
+   loss does not object enough to fix it.
+
+**Root cause A: the per-frame norm erases per-frame contrast.** The decisive
+experiment: feed a trained decoder a latent that flips between +5 and −5 and
+compare output frames. With `norm_mode="frame"` the output frames are
+**bit-identical** — because normalising each frame independently removes exactly
+the per-frame mean and scale that the encoder was using to carry the motion.
+Switching the same code to `norm_mode="clip"` changes the identical-input case
+from a delta of `0.0` to `1e-4`…`4e-4`. So this is a *measurable* consequence of
+the causality fix, not a guess, and it is now a config switch
+(`vae.norm_mode`) with the trade-off documented in the class docstring:
+
+| `norm_mode` | Per-frame contrast | Strict causality |
+|---|---|---|
+| `frame` (default) | discarded | yes |
+| `clip` | preserved | no — the causality test fails, streaming is unsafe |
+
+**Root cause B: loss balance.** In a typical clip, frame-to-frame differences
+are 10–30× smaller than per-pixel contrast, so plain L1 is minimised by emitting
+the average frame repeated N times. Measured loss components on a trained batch:
+`l1 = 0.137`, `temporal = 0.024`. Even at a temporal weight of 2 the motion term
+contributes less than a quarter of the appearance term, so "be still" stays the
+cheaper strategy.
+
+**What is in the code.** `recon_loss` now carries a temporal-gradient term
+(`|Δt rec − Δt video|`) because without it the collapse is not merely likely, it
+is optimal, and the training log prints the motion term (`motion=`) next to `l1`
+so the balance is visible while it trains.
+
+**What was tried and did not work.** Raising the temporal weight to 25 does not
+rescue it: reconstruction L1 degrades from 0.14 to 0.65+ and the reconstruction
+stays static. `norm_mode="clip"` removes the bit-identical symptom but does not
+by itself make a 400-step model animate — root cause B is a training-budget
+problem, and it needs a bigger model, real video, and a motion-aware objective.
+
+**What is still needed.** The things a real video VAE uses and that were
+deliberately left out of scope here:
+
+- a temporal-adversarial or motion-consistency loss, which penalises a still
+  decoder without also penalising a correct one;
+- normalising the temporal term by the magnitude of motion actually present in
+  the batch, so the balance does not depend on the clip;
+- training at a resolution and length where motion occupies more than a handful
+  of latent frames (this demo runs at 64×64, i.e. a 3-frame latent timeline);
+- choosing `norm_mode="clip"` and giving up the streaming guarantee, if per-frame
+  contrast matters more than causality for your use.
+
+The honest summary: **the codec and the denoiser are verified; the demo weights
+are not good enough to animate.** Everything in §3 through §5 of this document
+holds regardless, and nothing in the 8 GB analysis depends on this being fixed.
+
 
 ---
 

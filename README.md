@@ -76,7 +76,7 @@ nanoh3/
   engine/       int8/fp8 quantisation, block offload, memory budget, few-step sampler, pipeline
   data/         procedural clips; reference-clip preparation with a licence guard
   training/     two-stage trainer, few-step distillation
-  tests/        28 tests: shapes, causality, determinism, quantisation error, budget
+  tests/        31 tests: shapes, causality, determinism, quantisation error, offload, budget
 docs/
   RESEARCH-H3.md   the MiniMax-H3 study this design came out of
   DESIGN.md        architecture and the reasoning behind each choice
@@ -89,11 +89,11 @@ docs/
 
 ```bash
 $ python -m nanoh3.engine.budget --profile all
-[PASS] 8gb           256x256x16  4 steps  total=1.19 GiB
-       dit_weights       0.049 GiB
-       dit_activations   0.024 GiB
-       vae               0.222 GiB
-       workspace         0.879 GiB
+[PASS] 8gb                256x256x16 4 steps  total=1.19 GiB
+           dit_weights       0.037 GiB
+           dit_activations   0.030 GiB
+           vae               0.233 GiB
+           workspace         0.879 GiB
 ...
 ```
 
@@ -107,7 +107,8 @@ $ python -m pytest tests/test_model.py::test_vae_is_causal -q
 1 passed
 ```
 
-Appending arbitrary future frames leaves every earlier latent **bit-identical**.
+Appending arbitrary future frames leaves every earlier latent unchanged to float32
+precision (measured residual ~1e-7; the first latent frame is exactly equal).
 Getting there required two non-obvious fixes that are worth knowing about if you
 extend this code: left-only padding of `(k-1)·dilation` (which gives causality
 *and* `ceil(L/stride)` output length), and a per-frame group norm — plain

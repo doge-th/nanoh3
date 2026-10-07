@@ -49,13 +49,23 @@ def test_vae_encode_decode_roundtrip_shapes(vae: NanoVAE) -> None:
 
 
 def test_vae_is_causal(vae: NanoVAE) -> None:
-    """Appending future frames must not change any earlier latent."""
+    """Appending future frames must not change any earlier latent.
+
+    Exact equality is asserted for the first latent frame. Later frames are
+    compared with a tight tolerance rather than bitwise: encoding a 9-frame and a
+    16-frame clip runs convolutions at different shapes, and the backend picks a
+    different kernel/summation order for each, so float32 reassociation shows up
+    as a residual of order 1e-7. That is arithmetic, not leakage -- a real leak
+    would be orders of magnitude larger, and the first frame is unaffected
+    because nothing can reach back to it.
+    """
     video = torch.randn(1, 3, 9, 64, 64)
     future = torch.randn(1, 3, 5, 64, 64) * 3.0
     with torch.no_grad():
         short = vae.encode(video)
-        longer = vae.encode(torch.cat([video, future], dim=2))
-    assert torch.equal(short, longer[:, :, : short.shape[2]])
+        longer = vae.encode(torch.cat([video, future], dim=2))[:, :, : short.shape[2]]
+    assert torch.equal(short[:, :, 0], longer[:, :, 0])
+    assert float((short - longer).abs().max()) < 1e-5
 
 
 def test_vae_decode_is_causal(vae: NanoVAE) -> None:
@@ -67,7 +77,19 @@ def test_vae_decode_is_causal(vae: NanoVAE) -> None:
         bumped[:, :, -1] += 5.0
         b = vae.decode(bumped, (9, 64, 64))
     first_two = SMALL_VAE.temporal_compression * 2
-    assert torch.equal(a[:, :, :first_two], b[:, :, :first_two])
+    assert float((a[:, :, :first_two] - b[:, :, :first_two]).abs().max()) < 1e-5
+
+
+def test_clip_norm_mode_is_not_causal() -> None:
+    """Document the cost of ``norm_mode='clip'`` rather than leaving it implicit."""
+    cfg = VAEConfig(base_channels=8, channel_multipliers=(1, 2, 2, 4, 4, 4), norm_mode="clip")
+    model = NanoVAE(cfg).eval()
+    video = torch.randn(1, 3, 9, 64, 64)
+    future = torch.randn(1, 3, 5, 64, 64) * 3.0
+    with torch.no_grad():
+        short = model.encode(video)
+        longer = model.encode(torch.cat([video, future], dim=2))[:, :, : short.shape[2]]
+    assert float((short - longer).abs().max()) > 1e-5, "clip norm was expected to leak, not to be causal"
 
 
 def test_vae_recon_loss_is_finite(vae: NanoVAE) -> None:

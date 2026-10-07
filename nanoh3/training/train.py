@@ -154,7 +154,7 @@ def train_vae(cfg: TrainConfig, bundle: ModelBundle, device: torch.device, data:
         if step % cfg.log_every == 0 or step == 1:
             print(
                 f"[vae] step {step:5d}/{cfg.vae_steps} l1={metrics['l1']:.4f} "
-                f"kl={metrics['kl']:.3f} total={metrics['rec']:.4f}",
+                f"motion={metrics['temporal']:.4f} kl={metrics['kl']:.3f} total={metrics['rec']:.4f}",
                 flush=True,
             )
         stats["last"] = metrics["l1"]

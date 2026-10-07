@@ -101,24 +101,46 @@ class CausalConv3d(nn.Module):
         return self.conv(F.pad(x, self.pad, mode="replicate") if any(self.pad) else x)
 
 
-class FrameGroupNorm(nn.Module):
-    """GroupNorm applied independently to every frame.
+class ClipOrFrameNorm(nn.Module):
+    """GroupNorm whose statistics are either per-frame or per-clip.
 
     Plain ``nn.GroupNorm`` normalises over ``(C/G, T, H, W)``, so its output at
     frame ``t`` depends on the mean and variance of the *entire* clip -- a silent
     future-frame leak that survives any amount of careful causal padding. Folding
-    time into the batch dimension here makes the statistics per-frame, which is
-    both causal and the right behaviour for streaming.
+    time into the batch dimension makes the statistics per-frame, which fixes
+    causality and is what streaming needs.
+
+    **The cost is real and it is not obvious.** Per-frame normalisation also
+    discards each frame's own mean and variance. If the encoder represents motion
+    as a per-frame offset or contrast change -- which is the cheapest way to
+    encode it -- that information is annihilated, and a decoder fed latents that
+    differ only in offset emits *bit-identical* frames. Measured on a trained
+    model: flipping the latent between +5 and -5 changed the output by exactly
+    0.0.
+
+    So this is a switch, not a free win:
+
+    * ``"frame"`` (default) -- strictly causal, but per-frame contrast cannot pass.
+    * ``"clip"`` -- per-frame contrast survives, at the cost of the norm being
+      non-causal, which breaks the streaming guarantee and the causality test.
+
+    See ``docs/DESIGN.md`` for the measurement that led to making this explicit.
     """
 
-    def __init__(self, num_channels: int, num_groups: int, eps: float = 1e-6) -> None:
+    def __init__(self, num_channels: int, num_groups: int, eps: float = 1e-6, mode: str = "frame") -> None:
         super().__init__()
+        if mode not in ("frame", "clip"):
+            raise ValueError(f"norm mode must be 'frame' or 'clip', got {mode!r}")
         self.groups = num_groups
         self.eps = eps
+        self.mode = mode
         self.weight = nn.Parameter(torch.ones(num_channels))
         self.bias = nn.Parameter(torch.zeros(num_channels))
 
     def forward(self, x: Tensor) -> Tensor:
+        if self.mode == "clip":
+            y = F.group_norm(x, self.groups, self.weight, self.bias, self.eps)
+            return y
         b, c, t, h, w = x.shape
         y = x.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
         y = F.group_norm(y, self.groups, self.weight, self.bias, self.eps)
@@ -126,11 +148,11 @@ class FrameGroupNorm(nn.Module):
 
 
 class ResBlock3D(nn.Module):
-    def __init__(self, channels: int, kernel: Tuple[int, int, int] = (3, 3, 3)) -> None:
+    def __init__(self, channels: int, kernel: Tuple[int, int, int] = (3, 3, 3), norm_mode: str = "frame") -> None:
         super().__init__()
-        self.norm1 = FrameGroupNorm(channels, min(8, channels))
+        self.norm1 = ClipOrFrameNorm(channels, min(8, channels), mode=norm_mode)
         self.conv1 = CausalConv3d(channels, channels, kernel)
-        self.norm2 = FrameGroupNorm(channels, min(8, channels))
+        self.norm2 = ClipOrFrameNorm(channels, min(8, channels), mode=norm_mode)
         self.conv2 = CausalConv3d(channels, channels, kernel)
 
     def forward(self, x: Tensor) -> Tensor:
@@ -149,6 +171,7 @@ class VAEConfig:
     spatial_compression: int = 8
     temporal_compression: int = 4
     groups: int = 8
+    norm_mode: str = "frame"  # "frame" = strictly causal, "clip" = keeps per-frame contrast
 
     @property
     def num_downs(self) -> int:
@@ -175,25 +198,25 @@ class NanoVAE(nn.Module):
         enc: List[nn.Module] = [CausalConv3d(cfg.in_channels, chans[0])]
         for i, stride in enumerate(strides):
             for _ in range(cfg.num_res_blocks):
-                enc.append(ResBlock3D(chans[i]))
+                enc.append(ResBlock3D(chans[i], norm_mode=cfg.norm_mode))
             enc.append(CausalConv3d(chans[i], chans[i + 1], (3, 3, 3), stride=stride))
         self.encoder = nn.Sequential(*enc)
         # Bottleneck at the widest width, then project to 2x latent channels
         # (first half mean, second half log-variance).
-        self.mid = nn.Sequential(ResBlock3D(chans[-1]), ResBlock3D(chans[-1]))
+        self.mid = nn.Sequential(ResBlock3D(chans[-1], norm_mode=cfg.norm_mode), ResBlock3D(chans[-1], norm_mode=cfg.norm_mode))
         self.enc_to_latent = CausalConv3d(chans[-1], 2 * cfg.latent_channels)
 
         self.latent_to_dec = CausalConv3d(cfg.latent_channels, chans[-1])
-        self.dec_res = nn.Sequential(*[ResBlock3D(chans[-1]) for _ in range(cfg.num_res_blocks)])
+        self.dec_res = nn.Sequential(*[ResBlock3D(chans[-1], norm_mode=cfg.norm_mode) for _ in range(cfg.num_res_blocks)])
         # One up-stage per encoder down-stage, applied in reverse order.
         self.up_stages = nn.ModuleList(
             [
-                nn.Sequential(ResBlock3D(chans[i + 1]), CausalConv3d(chans[i + 1], chans[i]))
+                nn.Sequential(ResBlock3D(chans[i + 1], norm_mode=cfg.norm_mode), CausalConv3d(chans[i + 1], chans[i]))
                 for i in range(cfg.num_downs - 1, -1, -1)
             ]
         )
         self.dec_out = nn.Sequential(
-            FrameGroupNorm(chans[0], groups),
+            ClipOrFrameNorm(chans[0], groups, mode=cfg.norm_mode),
             nn.SiLU(),
             CausalConv3d(chans[0], cfg.in_channels),
         )
@@ -299,4 +322,4 @@ class NanoVAE(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
 
-__all__ = ["NanoVAE", "VAEConfig", "CausalConv3d", "causal_pad", "plan_strides", "ResBlock3D"]
+__all__ = ["NanoVAE", "VAEConfig", "CausalConv3d", "ClipOrFrameNorm", "causal_pad", "plan_strides", "ResBlock3D"]

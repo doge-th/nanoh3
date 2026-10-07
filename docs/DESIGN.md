@@ -22,7 +22,7 @@ memory is not the constraint  ->  time is the constraint
                               ->  spend the memory headroom on speed
 ```
 
-The reference profile lands at **1.29 GiB of 8 GiB**. That 6× headroom is not
+The reference profile lands at **1.19 GiB of 8 GiB**. That 6-7x headroom is not
 wasted; it is what makes depth pruning, aggressive quantisation and a 4-step
 schedule affordable without argument.
 
@@ -176,7 +176,7 @@ a property of the code, not of a README sentence.
   what it is.
 - **No int4.** The SVDQuant/NVFP4 ladder is where H3's ecosystem went, and
   implementing a 4-bit kernel is a project of its own. int8 already leaves us at
-  1.29 GiB of an 8 GiB budget; there is nothing to buy.
+  1.19 GiB of an 8 GiB budget; there is nothing to buy.
 
 ---
 

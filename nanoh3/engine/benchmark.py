@@ -32,6 +32,12 @@ from .pipeline import GenerationConfig, NanoH3Pipeline
 #: This is the single number every PROJECTED figure depends on.
 DEFAULT_GPU_TFLOPS = 100.0
 
+#: Assumed fixed cost of one denoising step on the target GPU: kernel launches
+#: plus weight traffic, independent of how small the model is. This is the term
+#: that actually binds at NanoH3's scale, and it is an assumption, not a
+#: measurement. Override with --step-overhead-ms after measuring your own card.
+DEFAULT_GPU_STEP_OVERHEAD_MS = 25.0
+
 
 def device_report() -> Dict[str, object]:
     info: Dict[str, object] = {
@@ -74,6 +80,18 @@ def vae_flops(profile: Profile) -> float:
     volume = profile.batch * profile.frames * profile.height * profile.width * profile.vae_base_channels
     # 27 MACs per 3x3x3 conv per output element, ~6 such layers at full resolution
     return float(volume * 27 * 6)
+
+
+def per_step_overhead(measured_denoise_s: float, steps: int) -> float:
+    """Seconds of fixed cost per denoising step on the machine that was measured.
+
+    At these model sizes the arithmetic is essentially free -- a 4-step 256x256
+    pass is ~2 TFLOP, which is milliseconds on any modern GPU. What actually
+    costs time is launching the kernels and streaming the weights, and that cost
+    does not shrink with the model. Measuring it here gives the floor that the
+    projection has to respect.
+    """
+    return measured_denoise_s / max(1, steps)
 
 
 def measure(
@@ -119,18 +137,36 @@ def measure(
     }
 
 
-def project(profile: Profile, tflops: float) -> Dict[str, float]:
-    """Projected wall clock for the DiT + VAE decode on an assumed GPU."""
+def project(profile: Profile, tflops: float, step_overhead_s: float) -> Dict[str, float]:
+    """Projected wall clock on an assumed GPU.
+
+    Two terms, and the larger one wins:
+
+    * **compute** -- counted MACs divided by the assumed effective throughput.
+    * **overhead** -- ``steps x per-step fixed cost``. Kernel launches and weight
+      traffic do not shrink with the model, and at this size they dominate.
+
+    Reporting only the compute term would produce a number in the tens of
+    milliseconds for a 4-step pass, which is not what a real run does: the local
+    measurement below shows ~19 ms per step *at 48 tokens*, where the arithmetic
+    is negligible. The projection takes the max so it cannot flatter itself.
+    """
     dit = dit_flops(profile) * profile.steps
     vae = vae_flops(profile)
     rate = tflops * 1e12
+    compute_denoise = dit / rate
+    overhead_denoise = step_overhead_s * profile.steps
+    compute_decode = vae / rate
     return {
         "total_tflop": round((dit + vae) / 1e12, 2),
         "dit_tflop": round(dit / 1e12, 2),
         "vae_tflop": round(vae / 1e12, 2),
-        "projected_denoise_s": round(dit / rate, 2),
-        "projected_decode_s": round(vae / rate, 2),
-        "projected_total_s": round((dit + vae) / rate, 2),
+        "compute_denoise_s": round(compute_denoise, 3),
+        "overhead_denoise_s": round(overhead_denoise, 3),
+        "denoise_s": round(max(compute_denoise, overhead_denoise), 3),
+        "decode_s": round(compute_decode, 3),
+        "total_s": round(max(compute_denoise, overhead_denoise) + compute_decode, 3),
+        "binding_term": "overhead" if overhead_denoise > compute_denoise else "compute",
     }
 
 
@@ -148,13 +184,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--repeats", type=int, default=2)
     ap.add_argument("--offload", action="store_true")
     ap.add_argument("--throughput", type=float, default=DEFAULT_GPU_TFLOPS, help="assumed effective TFLOP/s for projections")
+    ap.add_argument(
+        "--step-overhead-ms",
+        type=float,
+        default=DEFAULT_GPU_STEP_OVERHEAD_MS,
+        help="assumed fixed cost per denoising step on the target GPU (kernel launches, weight traffic)",
+    )
     ap.add_argument("--profile", default="8gb", help="budget profile to project")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--out", default=None, help="write the report to this path")
     args = ap.parse_args(argv)
 
-    report: Dict[str, object] = {"device": device_report(), "assumed_tflops": args.throughput}
-    report["VERIFIED"] = measure(
+    measured = measure(
         args.checkpoint,
         args.prompt,
         args.width,
@@ -167,19 +208,32 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.repeats,
         args.offload,
     )
+    local_per_step = per_step_overhead(
+        float(measured["measured"].get("denoise", 0.0)) if measured.get("measured") else 0.0,  # type: ignore[union-attr]
+        args.steps,
+    )
+    report: Dict[str, object] = {
+        "device": device_report(),
+        "assumed_tflops": args.throughput,
+        "assumed_step_overhead_ms": args.step_overhead_ms,
+        "VERIFIED": measured,
+    }
+    report["VERIFIED_local_per_step_ms"] = round(local_per_step * 1000, 2)
     profile = PROFILES[args.profile]
     report["PROJECTED"] = {
         "profile": profile.name,
         "shape": f"{profile.width}x{profile.height}x{profile.frames}",
         "steps": profile.steps,
         "assumed_effective_tflops": args.throughput,
-        **project(profile, args.throughput),
+        "assumed_step_overhead_ms": args.step_overhead_ms,
+        **project(profile, args.throughput, args.step_overhead_ms / 1000.0),
         "vram_budget_gib": round(profile.estimate()["total"] / GIB, 2),
     }
     report["UNKNOWN"] = [
         "CUDA wall-clock on an 8 GB card (no NVIDIA GPU in this environment)",
         "quantised int8/fp8 speedup on CUDA (fake-quant dequantises per matmul here)",
         "offload bandwidth cost on PCIe (offload is a no-op on CPU/MPS)",
+        "the per-step overhead constant, which is the binding term: it is assumed, not measured",
     ]
 
     text = json.dumps(report, indent=2)

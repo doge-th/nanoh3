@@ -10,11 +10,11 @@ size: 64
 batch_size: 4
 dataset_size: 256
 
-vae_steps: 200
+vae_steps: 800
 vae_lr: 3.0e-4
 vae_kl_weight: 1.0e-4
 
-dit_steps: 400
+dit_steps: 3000
 dit_lr: 3.0e-4
 text_lr: 3.0e-4
 text_loss_weight: 0.05
@@ -22,14 +22,14 @@ text_loss_weight: 0.05
 log_every: 25
 save_every: 200
 grad_clip: 1.0
-preview_every: 100
+preview_every: 500
 
 dit:
   latent_channels: 16
   patch_size: 2
-  hidden_size: 192
+  hidden_size: 256
   depth: 8
-  num_heads: 6
+  num_heads: 8
   mlp_ratio: 4.0
   text_dim: 128
   max_text_len: 77

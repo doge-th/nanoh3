@@ -30,7 +30,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
+import copy
+
 from torch import Tensor
 
 from ..engine.sampler import euler_step, timesteps
@@ -51,6 +52,10 @@ class DistillConfig:
     log_every: int = 25
     seed: int = 0
     max_seconds: float = 0.0
+    # Must match how the teacher was trained. Sampling from the posterior when
+    # the teacher was fit on the mean injects a large random perturbation into
+    # every distillation target and the loss diverges.
+    sample_latent: bool = False
 
 
 def velocity_to_x0(x_t: Tensor, v: Tensor, t: Tensor) -> Tensor:
@@ -87,19 +92,35 @@ def distill_step(
     mask: Tensor,
     cfg: DistillConfig,
 ) -> Tuple[Tensor, Dict[str, float]]:
-    states, ts = teacher_trajectory(teacher, latents, context, mask, cfg.teacher_schedule, shift=3.0)
+    """One distillation update: teach the student a longer jump than the teacher takes.
+
+    The trajectory must start from **noise** at ``t = 1``, not from the data. That
+    is the direction the sampler actually runs in; starting from the data and
+    integrating "backwards" from t=1 produces a trajectory the student will never
+    be asked to follow, and the loss diverges (observed: x0_mse ~1e3).
+    """
+    noise = torch.randn_like(latents)
+    states, ts = teacher_trajectory(teacher, noise, context, mask, cfg.teacher_schedule, shift=3.0)
     b = latents.shape[0]
     idx = torch.randint(0, cfg.teacher_schedule - cfg.skip + 1, (b,), device=latents.device)
-    x_t = torch.stack([states[int(i)] for i in idx])
+    # `states[j]` already carries the batch dimension, so gather rows rather than
+    # stacking whole batches (which would add a spurious leading axis).
+    x_t = torch.stack([states[int(j)][k] for k, j in enumerate(idx)])
     t_i = ts[idx]
-    target_x0 = torch.stack([states[int(i) + cfg.skip] for i in idx])
+    target_x0 = torch.stack([states[int(j) + cfg.skip][k] for k, j in enumerate(idx)])
 
+    # Below t_min the teacher endpoint is unreliable, so fall back to the real data.
     keep = (t_i >= cfg.t_min).float().view(-1, *([1] * (latents.dim() - 1)))
-    target_x0 = latents * (1 - keep) + target_x0 * keep  # no gradient needed at t < t_min
+    target_x0 = latents * (1 - keep) + target_x0 * keep
 
     v = student(x_t, t_i, context, mask)
     pred_x0 = velocity_to_x0(x_t, v, t_i)
-    loss = (F.mse_loss(pred_x0, target_x0, reduction="none") * keep).sum() / keep.sum().clamp(min=1.0)
+    # Normalise by the number of *masked elements*, not by the batch size:
+    # `keep` broadcasts over the latent dimensions, so `keep.sum()` counts one
+    # per sample while the numerator sums over every element. Dividing by the
+    # batch size inflates the loss (and the gradient) by the element count.
+    sq = (pred_x0 - target_x0).pow(2) * keep
+    loss = sq.sum() / keep.expand_as(sq).sum().clamp(min=1.0)
     return loss, {"t_mean": float(t_i.mean()), "x0_mse": float(loss.detach())}
 
 
@@ -129,11 +150,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     data = ProceduralClips(frames=train_cfg.frames, size=train_cfg.size, seed=train_cfg.seed)
     bundle = load_bundle(args.input, device)
-    teacher, student = bundle.dit, bundle.dit
+    # The teacher must be a *separate*, frozen copy. Sharing parameters would mean
+    # freezing the student's weights too, and the optimiser would then have
+    # nothing to update.
+    teacher = copy.deepcopy(bundle.dit).eval()
     for p in teacher.parameters():
         p.requires_grad_(False)
-    teacher.eval()
-    student.train()
+    student = bundle.dit.train()
 
     stats = bundle.meta.get("latent_stats", {}) if isinstance(bundle.meta, dict) else {}
     mean = float(stats.get("latent_mean", 0.0))
@@ -146,7 +169,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     for step in range(1, cfg.steps + 1):
         video, prompts = data.batch(cfg.batch_size)
         with torch.no_grad():
-            latent = ((bundle.vae.sample_latent(bundle.vae.encode(video.to(device))) - mean) / std).float()
+            posterior = bundle.vae.encode(video.to(device))
+            latent = (
+                bundle.vae.sample_latent(posterior)
+                if cfg.sample_latent
+                else posterior.chunk(2, dim=1)[0]
+            )
+            latent = ((latent - mean) / std).float()
         context, mask = bundle.text.embed_prompts(prompts, device)
         loss, metrics = distill_step(teacher, student, latent, context, mask, cfg)
         opt.zero_grad(set_to_none=True)

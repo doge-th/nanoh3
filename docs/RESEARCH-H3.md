@@ -206,7 +206,7 @@ assertion, not a licence, and the manifest records that it was asserted.
 implemented model that uses the same *public architectural vocabulary* (causal
 3D VAE, rectified-flow DiT, 3D RoPE, adaLN-Zero, guidance distillation) at a
 scale where the whole thing — denoiser, text tower, VAE, activations — fits in
-about 1.3 GiB. It will not match H3's quality and does not claim to.
+about 1.2 GiB. It will not match H3's quality and does not claim to.
 
 ---
 
@@ -217,7 +217,7 @@ denoiser weights already int8:
 
 | Profile | Shape | Steps | Total | Dominant term |
 |---|---|---|---|---|
-| 8gb | 256×256×16 | 4 | **1.29 GiB** | VAE decode + 0.88 GiB CUDA workspace floor |
+| 8gb | 256×256×16 | 4 | **1.19 GiB** | VAE decode + 0.88 GiB CUDA workspace floor |
 | 8gb-tiny | 256×256×16 | 4 | 1.16 GiB | same |
 | 8gb-512 | 512×288×24 | 4 | 1.32 GiB | activations |
 | 24gb | 512×288×24 | 8 | 2.61 GiB | bf16 weights, no offload |

@@ -48,7 +48,13 @@ def module_bytes(module: nn.Module) -> int:
 
 
 class OffloadedBlock(nn.Module):
-    """Runs ``block`` with its weights streamed in and out around each call."""
+    """Runs ``block`` with its weights streamed in and out around each call.
+
+    ``cpu_is_noop`` exists so the CPU can be treated as a real target. In
+    production it stays ``True`` (copying host memory to host memory is pure
+    waste); the test suite sets it ``False`` so the streaming path is actually
+    executed on machines that have no accelerator.
+    """
 
     def __init__(
         self,
@@ -57,11 +63,12 @@ class OffloadedBlock(nn.Module):
         enabled: bool = True,
         executor: Optional[ThreadPoolExecutor] = None,
         stats: Optional[OffloadStats] = None,
+        cpu_is_noop: bool = True,
     ) -> None:
         super().__init__()
         self.block = block
         self.device = device
-        self.enabled = enabled and device.type != "cpu"
+        self.enabled = enabled and not (cpu_is_noop and device.type == "cpu")
         self.executor = executor
         self.stats = stats or OffloadStats(active=self.enabled)
         self.stats.active = self.stats.active or self.enabled
@@ -127,10 +134,16 @@ class SequentialOffload:
         print(offload.stats.summary())
     """
 
-    def __init__(self, container: nn.ModuleList, device: torch.device, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        container: nn.ModuleList,
+        device: torch.device,
+        enabled: bool = True,
+        cpu_is_noop: bool = True,
+    ) -> None:
         self.container = container
         self.device = device
-        self.enabled = enabled and device.type != "cpu"
+        self.enabled = enabled and not (cpu_is_noop and device.type == "cpu")
         self.stats = OffloadStats(active=self.enabled)
         self._executor: Optional[ThreadPoolExecutor] = None
 
@@ -138,7 +151,16 @@ class SequentialOffload:
         if self.enabled:
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nanoh3-offload")
             for i in range(len(self.container)):
-                self.container[i] = OffloadedBlock(self.container[i], self.device, True, self._executor, self.stats)
+                # cpu_is_noop=False: this context manager has already made the
+                # decision, so the wrappers must not second-guess it.
+                self.container[i] = OffloadedBlock(
+                    self.container[i],
+                    self.device,
+                    True,
+                    self._executor,
+                    self.stats,
+                    cpu_is_noop=False,
+                )
         return self
 
     def __exit__(self, *exc: Any) -> None:

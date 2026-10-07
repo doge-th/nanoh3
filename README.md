@@ -9,11 +9,18 @@ weights, no MiniMax code, and no data derived from MiniMax outputs.
 git clone <this repo> && cd nanoh3
 pip install torch numpy pillow imageio imageio-ffmpeg pyyaml pytest
 
-# train the demonstration model and generate a video (CPU or Apple Silicon, ~10 min)
+# train the demonstration model and generate a video (CPU or Apple Silicon, ~30 min)
 python -m nanoh3.training.train --config configs/demo.yaml
 python -m nanoh3 generate --checkpoint runs/demo/model.pt \
     --prompt "a red circle on a grey background that moves to the right" \
     -o out.mp4 --width 128 --height 128 --frames 9 --steps 8
+```
+
+Shorten the wait while you are reading the code — `--steps N` overrides both stage
+counts, and a 60-step run is enough to see loss come down:
+
+```bash
+python -m nanoh3.training.train --config configs/demo.yaml --steps 60
 ```
 
 ---
@@ -38,7 +45,7 @@ The measurements that shaped this project:
 
 NanoH3 takes the same public architectural vocabulary — causal 3D VAE, rectified
 flow, 3D RoPE, adaLN-Zero, guidance distillation — and builds it at a size where
-the whole stack, activations included, fits in **about 1.3 GiB**, leaving the
+the whole stack, activations included, fits in **about 1.2 GiB**, leaving the
 whole 8 GB budget available. Full research notes with sources:
 [`docs/RESEARCH-H3.md`](docs/RESEARCH-H3.md).
 
@@ -51,7 +58,7 @@ code, data pipeline and licence are all yours to read, change and ship.
 
 | Target | Status | Evidence |
 |---|---|---|
-| Fits in 8 GB VRAM | ✅ **verified by assertion** | `python -m nanoh3.engine.budget --profile 8gb` computes the peak and fails if it exceeds 8 GiB; `tests/test_model.py::test_8gb_profile_fits_8gib` asserts the same. Reference profile: **1.29 GiB**. |
+| Fits in 8 GB VRAM | ✅ **verified by assertion** | `python -m nanoh3.engine.budget --profile 8gb` computes the peak and fails if it exceeds 8 GiB; `tests/test_model.py::test_8gb_profile_fits_8gib` asserts the same. Reference profile: **1.19 GiB**. |
 | Generates in under a minute | ⚠️ **target, not a measured 8 GB result** | No NVIDIA GPU was available during development. See [`docs/BENCHMARK.md`](docs/BENCHMARK.md) for the projection, its arithmetic and its assumptions. |
 
 Anything this project cannot prove on the hardware it was built on is labelled
@@ -82,7 +89,7 @@ docs/
 
 ```bash
 $ python -m nanoh3.engine.budget --profile all
-[PASS] 8gb           256x256x16  4 steps  total=1.29 GiB
+[PASS] 8gb           256x256x16  4 steps  total=1.19 GiB
        dit_weights       0.049 GiB
        dit_activations   0.024 GiB
        vae               0.222 GiB

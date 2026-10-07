@@ -65,9 +65,9 @@ class NanoH3Pipeline:
         self.bundle = bundle
         self.device = torch.device(device)
         self.dtype = dtype
-        self.vae.to(self.device, dtype)
-        self.dit.to(self.device)
-        self.text.to(self.device, dtype)
+        self.vae = bundle.vae.to(self.device, dtype)
+        self.dit = bundle.dit.to(self.device)
+        self.text = bundle.text.to(self.device, dtype)
         self.dit.eval()
         self.vae.eval()
         self.text.eval()

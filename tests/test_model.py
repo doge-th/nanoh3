@@ -1,4 +1,4 @@
-"""Shape, causality, determinism and budget tests.
+"""Shape, causality, determinism, offload and budget tests.
 
 These are the tests that decide whether the 8 GB claim and the VAE's streaming
 property are real, so they assert on numbers rather than on "it ran".
@@ -10,8 +10,10 @@ import math
 
 import pytest
 import torch
+from torch import Tensor, nn
 
 from nanoh3.engine.budget import GIB, PROFILES, Profile, assert_fits
+from nanoh3.engine.offload import OffloadedBlock, SequentialOffload, module_bytes
 from nanoh3.engine.quant import dequantize_tensor, quantize_module_, quantize_tensor, storage_bytes
 from nanoh3.engine.sampler import SamplerConfig, add_noise, sample, timesteps
 from nanoh3.models import DiTConfig, NanoDiT, NanoTextEncoder, NanoVAE, TextEncoderConfig, VAEConfig
@@ -273,6 +275,59 @@ def test_quantize_module_shrinks_storage() -> None:
     with torch.no_grad():
         out = dit(torch.randn(1, 16, 2, 4, 4), torch.rand(1), None, None)
     assert out.shape == (1, 16, 2, 4, 4)
+
+
+# ------------------------------------------------------------------- offload
+
+
+class _TinyBlock(nn.Module):
+    """Stand-in with the same call signature as a DiT block."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc = nn.Linear(8, 8, bias=False)
+
+    def forward(self, x: Tensor, *args: object) -> Tensor:
+        return self.fc(x)
+
+
+def test_offloaded_block_is_numerically_transparent() -> None:
+    """Streaming weights in and out must not change the result.
+
+    The offload path is a no-op on CPU by default, so this forces it on: the point
+    is that the move-to-host / move-to-device dance leaves the maths identical.
+    """
+    block = _TinyBlock().eval()
+    x = torch.randn(2, 8)
+    with torch.no_grad():
+        expected = block(x)
+    wrapped = OffloadedBlock(block, torch.device("cpu"), enabled=True, cpu_is_noop=False)
+    with torch.no_grad():
+        actual = wrapped(x)
+    assert torch.allclose(expected, actual, atol=1e-6)
+    assert wrapped.stats.moves > 0
+    assert wrapped.stats.bytes_to_device == module_bytes(block)
+    assert wrapped.stats.bytes_to_host == module_bytes(block)
+    assert "offloaded=True" in wrapped.extra_repr()
+
+
+def test_sequential_offload_restores_the_module_list() -> None:
+    """Entering the context must swap blocks, and leaving it must put them back."""
+    model = NanoDiT(SMALL_DIT).eval()
+    z, ctx = torch.randn(1, 16, 2, 4, 4), torch.randn(1, 4, 48)
+    with torch.no_grad():
+        before = model(z, torch.tensor([0.5]), ctx, None)
+    originals = list(model.blocks)
+    with SequentialOffload(model.blocks, torch.device("cpu"), enabled=True, cpu_is_noop=False) as offload:
+        assert all(isinstance(b, OffloadedBlock) for b in model.blocks)
+        with torch.no_grad():
+            during = model(z, torch.tensor([0.5]), ctx, None)
+        assert offload.stats.moves > 0
+    assert list(model.blocks) == originals
+    with torch.no_grad():
+        after = model(z, torch.tensor([0.5]), ctx, None)
+    assert torch.allclose(before, during, atol=1e-6)
+    assert torch.allclose(before, after, atol=1e-6)
 
 
 # ------------------------------------------------------------------- budget

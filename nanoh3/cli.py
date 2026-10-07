@@ -45,6 +45,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         offload=args.offload,
         offload_vae=args.offload_vae,
         decode_chunk=args.decode_chunk,
+        active_depth=args.active_depth,
         progress=not args.quiet,
     )
     t0 = time.perf_counter()
@@ -136,6 +137,12 @@ def build_parser() -> argparse.ArgumentParser:
     gen.add_argument("--offload", action="store_true", help="stream DiT blocks through host RAM")
     gen.add_argument("--offload-vae", action="store_true")
     gen.add_argument("--decode-chunk", type=int, default=0)
+    gen.add_argument(
+        "--active-depth",
+        type=int,
+        default=0,
+        help="keep only the first N denoiser blocks (0 = all). Fewer blocks is linear speed and memory saving.",
+    )
     gen.add_argument("--quiet", action="store_true")
     gen.set_defaults(func=cmd_generate)
 

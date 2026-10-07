@@ -2,7 +2,7 @@
 
 Everything here is written for a single NVIDIA GPU with 8 GB of VRAM (RTX 3050 /
 4060 / 5060 class). The important part is that **8 GB of VRAM is not the
-constraint for this model** — the reference profile needs 1.29 GiB — so the
+constraint for this model** — the reference profile needs 1.19 GiB — so the
 runbook is mostly about the constraint that *is* real: getting a trained
 checkpoint, and not wasting time on the sampler.
 
@@ -64,7 +64,7 @@ python -m nanoh3 generate \
 |---|---|
 | `--quant int8` | weights to 1 byte each. Measured round-trip error < 0.02 absolute. |
 | `--steps 4` | the post-distillation schedule. 4 steps vs H3's 20–50 is a 5–12× compute cut. |
-| `--offload` | streams denoiser blocks through host RAM. Unnecessary at 1.29 GiB, cheap insurance if you raise resolution. |
+| `--offload` | streams denoiser blocks through host RAM. Unnecessary at 1.19 GiB, cheap insurance if you raise resolution. |
 | `--decode-chunk 4` | caps VAE decoder activations at 4 latent frames. The decoder is the largest activation consumer. |
 | `--device cuda --dtype bf16` | explicit is faster than `auto` on a first run, because you see the device it chose. |
 

@@ -25,7 +25,7 @@ Status key: ✅ verified with evidence · ⚠️ partial, needs human/hardware c
 | P0-9 | The <60 s target is labelled target-vs-verified, never claimed as a measured 8 GB result | ✅ | `docs/BENCHMARK.md`; README "The two targets, and how honestly we report them". |
 | P0-10 | Distillation from a long-schedule model to few steps works | ✅ | `python -m nanoh3.training.distill … --steps 20` → x0_mse **0.2205 → 0.1885**. Three real bugs found and fixed here (trajectory direction, teacher/student aliasing, loss normalisation). |
 | P0-11 | Teacher-data pipeline exists **with a licence guard** | ✅ | `scripts/prepare_teacher_data.py` refuses `MiniMaxAI/MiniMax-H3` (licence §V.3) and exits non-zero; also blocks `Comfy-Org/MiniMax-H3` and `minimax/minimax-h3`. Dry-run manifest verified. |
-| P0-12 | Test suite passes | ✅ | `31 passed`; `ruff check --select F,E9` clean. |
+| P0-12 | Test suite passes | ✅ | `33 passed`; `ruff check --select F,E9` clean. |
 | P0-13 | Open-source hygiene: Apache-2.0, README, no weights committed, publish script | ✅ | `LICENSE` (Apache-2.0, 202 lines), `.gitignore` excludes `*.pt`/`*.mp4`/`runs/`, `git ls-files` shows 36 files with **no** checkpoints, `scripts/publish.sh` with an interactive confirmation gate, CI workflow runs tests + budget + licence guard. |
 
 ## P1 — quality bar

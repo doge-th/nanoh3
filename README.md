@@ -76,7 +76,7 @@ nanoh3/
   engine/       int8/fp8 quantisation, block offload, memory budget, few-step sampler, pipeline
   data/         procedural clips; reference-clip preparation with a licence guard
   training/     two-stage trainer, few-step distillation
-  tests/        31 tests: shapes, causality, determinism, quantisation error, offload, budget
+  tests/        33 tests: shapes, causality, determinism, quantisation error, offload, budget
 docs/
   RESEARCH-H3.md   the MiniMax-H3 study this design came out of
   DESIGN.md        architecture and the reasoning behind each choice

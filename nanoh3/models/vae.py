@@ -46,11 +46,44 @@ def causal_pad(kernel: Sequence[int], dilation: Sequence[int], stride: Sequence[
     return pad
 
 
-def plan_strides(spatial_compression: int, temporal_compression: int, num_downs: int) -> List[Tuple[int, int, int]]:
+def centered_pad(kernel: Sequence[int], dilation: Sequence[int]) -> List[int]:
+    """Symmetric padding, preserving length -- for the *decoder*.
+
+    The decoder must not be causal. With nearest-neighbour temporal upsampling,
+    a causal decoder convolution looks back over three neighbours that are mostly
+    the *previous* latent: for output frame 4 the three taps come from
+    ``[latent0, latent0, latentent1]``. Measured on this model, that skews the
+    gradient so hard that ``|d out[4] / d latent0| = 1670`` against
+    ``|d out[4] / d latent1| = 31`` -- and "copy the first latent and repeat"
+    becomes the cheapest way to minimise any reconstruction loss, which is
+    exactly the static output this design was fighting.
+
+    Centring the taps on the current frame (``[latent0, latent1, latent1]``)
+    restores the balance. MiniMax-H3's own VAE makes the same choice:
+    its config states ``causal_encoder: true, causal_decoder: false``.
+    """
+    pad: List[int] = []
+    for k, d in zip(reversed(kernel), reversed(dilation)):
+        reach = (k - 1) * d
+        pad.extend([reach // 2, reach - reach // 2])
+    return pad
+
+
+def plan_strides(
+    spatial_compression: int, temporal_compression: int, num_downs: int, order: str = "time_first"
+) -> List[Tuple[int, int, int]]:
     """Split ``num_downs`` downsampling convs between the time and spatial axes.
 
-    Temporal reduction goes first (early layers), so a decoder can upsample
-    frames before paying for full-resolution pixels.
+    ``order`` controls where the temporal reduction happens:
+
+    * ``"time_first"`` -- all temporal downsampling in the earliest stages, so the
+      decoder can expand frames before paying for full-resolution pixels. Cheap,
+      but it averages motion *at full spatial resolution*, where a moving object
+      occupies a handful of pixels out of 64x64, and the measured result was that
+      the encoder wrote motion into the latent at 0.07 % of its magnitude.
+    * ``"interleaved"`` -- alternate temporal and spatial downsampling. Motion is
+      reduced once the features are already spatial, and each latent frame ends up
+      with a comparable share of the motion signal.
     """
     t_downs = int(round(math.log2(temporal_compression)))
     s_downs = int(round(math.log2(spatial_compression)))
@@ -61,19 +94,31 @@ def plan_strides(spatial_compression: int, temporal_compression: int, num_downs:
             f"{t_downs} temporal + {s_downs} spatial downsamples need {t_downs + s_downs} stages, got {num_downs}"
         )
     strides: List[Tuple[int, int, int]] = []
+    if order == "time_first":
+        for i in range(num_downs):
+            stride_t = 2 if i < t_downs else 1
+            stride_s = 2 if i >= t_downs else 1
+            strides.append((stride_t, stride_s, stride_s))
+        return strides
+    if order != "interleaved":
+        raise ValueError(f"order must be 'time_first' or 'interleaved', got {order!r}")
+    # Spread the two reductions across the available stages, temporal first.
     for i in range(num_downs):
         stride_t = 2 if i < t_downs else 1
-        stride_s = 2 if i >= t_downs else 1
+        stride_s = 2 if i < t_downs + s_downs else 1
         strides.append((stride_t, stride_s, stride_s))
     return strides
 
 
 class CausalConv3d(nn.Module):
-    """Conv3d with left-only padding.
+    """Conv3d whose padding is either causal (encoder) or centred (decoder).
 
     ``torch.nn.Conv3d`` only accepts symmetric padding, so the asymmetric causal
     padding is applied explicitly with ``F.pad`` before the convolution.
     ``replicate`` mode keeps the first frame from being darkened by a zero border.
+
+    Set ``causal=False`` for decoder layers: see :func:`centered_pad` for the
+    measurement that makes this necessary rather than merely tidy.
     """
 
     def __init__(
@@ -84,16 +129,18 @@ class CausalConv3d(nn.Module):
         stride: Sequence[int] = (1, 1, 1),
         dilation: Sequence[int] = (1, 1, 1),
         bias: bool = True,
+        causal: bool = True,
     ) -> None:
         super().__init__()
-        self.pad = causal_pad(kernel, dilation, stride)
+        self.causal = causal
+        self.pad = causal_pad(kernel, dilation, stride) if causal else centered_pad(kernel, dilation)
         self.conv = nn.Conv3d(
             in_channels,
             out_channels,
             tuple(kernel),
             stride=tuple(stride),
             dilation=tuple(dilation),
-            padding=0,  # the asymmetric causal pad is applied explicitly above
+            padding=0,  # the pad is applied explicitly above
             bias=bias,
         )
 
@@ -148,12 +195,18 @@ class ClipOrFrameNorm(nn.Module):
 
 
 class ResBlock3D(nn.Module):
-    def __init__(self, channels: int, kernel: Tuple[int, int, int] = (3, 3, 3), norm_mode: str = "frame") -> None:
+    def __init__(
+        self,
+        channels: int,
+        kernel: Tuple[int, int, int] = (3, 3, 3),
+        norm_mode: str = "frame",
+        causal: bool = True,
+    ) -> None:
         super().__init__()
         self.norm1 = ClipOrFrameNorm(channels, min(8, channels), mode=norm_mode)
-        self.conv1 = CausalConv3d(channels, channels, kernel)
+        self.conv1 = CausalConv3d(channels, channels, kernel, causal=causal)
         self.norm2 = ClipOrFrameNorm(channels, min(8, channels), mode=norm_mode)
-        self.conv2 = CausalConv3d(channels, channels, kernel)
+        self.conv2 = CausalConv3d(channels, channels, kernel, causal=causal)
 
     def forward(self, x: Tensor) -> Tensor:
         h = self.conv1(F.silu(self.norm1(x)))
@@ -172,6 +225,13 @@ class VAEConfig:
     temporal_compression: int = 4
     groups: int = 8
     norm_mode: str = "frame"  # "frame" = strictly causal, "clip" = keeps per-frame contrast
+    downsample_order: str = "time_first"  # "time_first" | "interleaved"
+    # The decoder is deliberately NOT causal by default, matching MiniMax-H3's own
+    # VAE ("causal_encoder: true, causal_decoder: false"). A causal decoder after
+    # nearest-neighbour temporal upsampling skews its receptive field backwards and
+    # makes "repeat the first latent" the cheapest reconstruction. Set True only if
+    # you need a strictly streaming decoder and accept the static-output failure.
+    causal_decoder: bool = False
 
     @property
     def num_downs(self) -> int:
@@ -183,7 +243,9 @@ class VAEConfig:
 
     @property
     def strides(self) -> List[Tuple[int, int, int]]:
-        return plan_strides(self.spatial_compression, self.temporal_compression, self.num_downs)
+        return plan_strides(
+            self.spatial_compression, self.temporal_compression, self.num_downs, self.downsample_order
+        )
 
 
 class NanoVAE(nn.Module):
@@ -206,19 +268,28 @@ class NanoVAE(nn.Module):
         self.mid = nn.Sequential(ResBlock3D(chans[-1], norm_mode=cfg.norm_mode), ResBlock3D(chans[-1], norm_mode=cfg.norm_mode))
         self.enc_to_latent = CausalConv3d(chans[-1], 2 * cfg.latent_channels)
 
-        self.latent_to_dec = CausalConv3d(cfg.latent_channels, chans[-1])
-        self.dec_res = nn.Sequential(*[ResBlock3D(chans[-1], norm_mode=cfg.norm_mode) for _ in range(cfg.num_res_blocks)])
+        dec_causal = cfg.causal_decoder
+        self.latent_to_dec = CausalConv3d(cfg.latent_channels, chans[-1], causal=dec_causal)
+        self.dec_res = nn.Sequential(
+            *[
+                ResBlock3D(chans[-1], norm_mode=cfg.norm_mode, causal=dec_causal)
+                for _ in range(cfg.num_res_blocks)
+            ]
+        )
         # One up-stage per encoder down-stage, applied in reverse order.
         self.up_stages = nn.ModuleList(
             [
-                nn.Sequential(ResBlock3D(chans[i + 1], norm_mode=cfg.norm_mode), CausalConv3d(chans[i + 1], chans[i]))
+                nn.Sequential(
+                    ResBlock3D(chans[i + 1], norm_mode=cfg.norm_mode, causal=dec_causal),
+                    CausalConv3d(chans[i + 1], chans[i], causal=dec_causal),
+                )
                 for i in range(cfg.num_downs - 1, -1, -1)
             ]
         )
         self.dec_out = nn.Sequential(
             ClipOrFrameNorm(chans[0], groups, mode=cfg.norm_mode),
             nn.SiLU(),
-            CausalConv3d(chans[0], cfg.in_channels),
+            CausalConv3d(chans[0], cfg.in_channels, causal=dec_causal),
         )
         self._decode_order = strides  # ups run in reverse of the encoder
 
@@ -282,16 +353,34 @@ class NanoVAE(nn.Module):
         logvar = self._logvar(posterior)
         return 0.5 * (mean.pow(2) + logvar.exp() - 1.0 - logvar).mean()
 
-    def recon_loss(self, video: Tensor, kl_weight: float = 1e-4, temporal_weight: float = 2.0) -> Tuple[Tensor, dict]:
-        """L1 + multi-scale gradient + temporal gradient + a small KL term.
+    def recon_loss(
+        self,
+        video: Tensor,
+        kl_weight: float = 1e-4,
+        temporal_weight: float = 10.0,
+        temporal_relative: bool = True,
+        temporal_form: str = "motion_weighted",
+    ) -> Tuple[Tensor, dict]:
+        """L1 + multi-scale gradient + motion-weighted temporal gradient + small KL.
 
-        The temporal term is not optional. Frame-to-frame differences in a video
-        are typically 10-30x smaller than per-pixel contrast, so plain L1 is
-        minimised by emitting a single averaged frame repeated N times -- the
-        decoder reaches a good loss while producing **no motion at all**. Measured
-        before this term existed: reconstruction frame-to-frame delta of exactly
-        0.0 on clips whose latents clearly varied over time. Matching the temporal
-        gradient directly is what forces the decoder to animate.
+        The temporal term is not optional, and its *form* is the part that matters.
+        Frame-to-frame differences in a video are typically 10-30x smaller than
+        per-pixel contrast, so plain L1 is minimised by emitting one averaged frame
+        repeated N times -- the decoder reaches a good loss while producing **no
+        motion at all**. Measured before this term existed: reconstruction
+        frame-to-frame delta of exactly 0.0, over 600 steps of overfitting four
+        clips.
+
+        Unweighted temporal losses are not enough either. In a typical clip more
+        than 90 % of pixels sit on a static background, where ``d_rec - d_ref`` is
+        exactly zero and the term contributes no gradient, so the gradient that
+        could teach motion is diluted to nothing. Weighting by ``|d_ref|`` per
+        pixel concentrates it on the pixels that actually move. See the comment on
+        ``temporal_form`` below for the measurement.
+
+        ``temporal_relative`` (default) divides by the mean squared motion, making
+        the term scale-free: a static decoder scores ~1.0 however fast the clip
+        moves. Set ``temporal_relative=False`` for the absolute form.
         """
         posterior = self.encode(video)
         latent = posterior.chunk(2, dim=1)[0]
@@ -305,7 +394,38 @@ class NanoVAE(nn.Module):
         if video.shape[2] > 1:
             d_rec = rec[:, :, 1:] - rec[:, :, :-1]
             d_ref = video[:, :, 1:] - video[:, :, :-1]
-            temporal = F.l1_loss(d_rec, d_ref)
+            if temporal_form == "motion_weighted":
+                # Two details here are what make motion appear at all, and both were
+                # found by measurement rather than by reasoning.
+                #
+                # 1. Weight each pixel by how much it actually moves. In a typical
+                #    video >90% of pixels sit on a static background where
+                #    ``d_rec - d_ref`` is exactly zero, so an unweighted term has
+                #    almost no gradient where motion lives. Same seed, 25 steps:
+                #    unweighted MSE and Charbonnier both stayed at a reconstruction
+                #    frame-delta of exactly 0.00000; this reached 0.32.
+                # 2. Normalise **per clip**, not per batch. Clips in the same batch
+                #    differ by more than an order of magnitude in how much they
+                #    move, so a batch-level mean makes the loss jump by ~20x between
+                #    steps and the run never settles: measured reconstruction L1
+                #    oscillating between 0.05 and 1.27 across consecutive batches.
+                per_clip = (d_ref.abs() * (d_rec - d_ref).pow(2)).flatten(1).sum(1)
+                per_clip_w = d_ref.abs().flatten(1).sum(1)
+                scale = d_ref.pow(2).flatten(1).mean(1).clamp(min=1e-8)
+                raw = per_clip / per_clip_w.clamp(min=1e-8)
+                if temporal_relative:
+                    raw = raw / scale
+                # A clip with no motion at all should not be asked to move.
+                temporal = torch.where(per_clip_w > 1e-6, raw, torch.zeros_like(raw)).mean()
+            elif temporal_form == "l1":
+                temporal = F.l1_loss(d_rec, d_ref)
+            elif temporal_form == "mse":
+                temporal = F.mse_loss(d_rec, d_ref)
+            else:
+                raise ValueError(f"unknown temporal_form {temporal_form!r}")
+            if temporal_relative and temporal_form != "motion_weighted":
+                # Scale-free: a static decoder scores ~1.0 whatever the clip does.
+                temporal = temporal / d_ref.pow(2).mean().clamp(min=1e-8)
         else:
             temporal = l1.new_zeros(())
         kl = self.kl_divergence(posterior)

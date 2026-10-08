@@ -68,16 +68,56 @@ def test_vae_is_causal(vae: NanoVAE) -> None:
     assert float((short - longer).abs().max()) < 1e-5
 
 
-def test_vae_decode_is_causal(vae: NanoVAE) -> None:
-    """A latent frame's pixels must not depend on later latent frames."""
+def test_vae_decode_is_causal_when_asked() -> None:
+    """``causal_decoder=True`` must restore strict decoder causality.
+
+    The default is a *non*-causal decoder, matching MiniMax-H3's own VAE
+    (``causal_encoder: true, causal_decoder: false``) and for the reason measured
+    in ``docs/DESIGN.md``: a causal decoder after nearest-neighbour upsampling
+    looks backwards so hard that copying the first latent wins every loss.
+    """
+    cfg = VAEConfig(base_channels=8, channel_multipliers=(1, 2, 2, 4, 4, 4), causal_decoder=True)
+    model = NanoVAE(cfg).eval()
     latent = torch.randn(1, SMALL_VAE.latent_channels, 3, 8, 8)
     with torch.no_grad():
-        a = vae.decode(latent, (9, 64, 64))
+        a = model.decode(latent, (9, 64, 64))
         bumped = latent.clone()
         bumped[:, :, -1] += 5.0
-        b = vae.decode(bumped, (9, 64, 64))
+        b = model.decode(bumped, (9, 64, 64))
     first_two = SMALL_VAE.temporal_compression * 2
     assert float((a[:, :, :first_two] - b[:, :, :first_two]).abs().max()) < 1e-5
+
+
+def test_default_decoder_is_not_causal_and_that_is_intentional() -> None:
+    """The default decoder is centred, so later latents may affect earlier frames."""
+    model = NanoVAE(SMALL_VAE).eval()
+    latent = torch.randn(1, SMALL_VAE.latent_channels, 3, 8, 8)
+    with torch.no_grad():
+        a = model.decode(latent, (9, 64, 64))
+        bumped = latent.clone()
+        bumped[:, :, -1] += 5.0
+        b = model.decode(bumped, (9, 64, 64))
+    assert float((a - b).abs().max()) > 1e-5
+
+
+def test_decoder_receptive_field_is_centred_on_its_own_latent() -> None:
+    """Output frame 4 must depend on latent 1 about as much as on latent 0.
+
+    This is the regression test for the static-output bug: with a causal decoder
+    this ratio measured 144x, which made "repeat the first latent" the cheapest
+    reconstruction and froze every generated clip. Anything above ~5x means the
+    skew is back.
+    """
+    model = NanoVAE(SMALL_VAE).eval()
+    latents = torch.randn(1, SMALL_VAE.latent_channels, 3, 8, 8)
+    z = latents.clone().requires_grad_(True)
+    out = model.decode(z, (9, 64, 64))
+    grad = torch.autograd.grad(out[0, :, 4].abs().sum(), z)[0]
+    w0 = float(grad[:, :, 0].abs().mean())
+    w1 = float(grad[:, :, 1].abs().mean())
+    ratio = w0 / max(w1, 1e-12)
+    assert ratio < 5.0, f"decoder receptive field is skewed {ratio:.1f}x towards latent 0"
+    assert w1 > 0, "output frame 4 ignores the latent it should be built from"
 
 
 def test_clip_norm_mode_is_not_causal() -> None:

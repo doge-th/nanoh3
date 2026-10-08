@@ -10,12 +10,14 @@ size: 64
 batch_size: 4
 dataset_size: 256
 
-vae_steps: 800
+vae_steps: 700
 vae_lr: 3.0e-4
 vae_kl_weight: 1.0e-4
-vae_temporal_weight: 2.0
+vae_temporal_weight: 1.0
+vae_temporal_relative: true
+vae_temporal_form: motion_weighted
 
-dit_steps: 3000
+dit_steps: 1600
 dit_lr: 3.0e-4
 text_lr: 3.0e-4
 text_loss_weight: 0.05
@@ -45,6 +47,8 @@ vae:
   spatial_compression: 8
   temporal_compression: 4
   groups: 8
+  norm_mode: clip
+  causal_decoder: false
 
 text:
   vocab_size: 256

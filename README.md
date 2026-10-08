@@ -183,6 +183,14 @@ Stated plainly, because you will hit them:
    `(B, L, text_dim)` — the denoiser does not know the difference.
 6. **English-ish prompts only** in the demo, because the dataset is.
 7. **Video only, no audio.** H3 generates audio in the same pass; we do not.
+8. **The demo VAE is not strictly causal.** `norm_mode: clip` plus
+   `causal_decoder: false` are what make motion survive; the strictly causal
+   configuration is still implemented, tested, and available, but it produces
+   still frames. The trade-off is measured in
+   [`docs/DESIGN.md`](docs/DESIGN.md) §"Getting the clip to move".
+9. **Demo motion is coarse.** A 9-frame clip is 3 latent frames, so the model
+   learns "the object is elsewhere now" rather than a smooth trajectory. Real
+   quality needs longer clips and real video.
 
 ---
 

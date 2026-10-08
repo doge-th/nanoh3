@@ -43,7 +43,9 @@ class TrainConfig:
     vae_steps: int = 300
     vae_lr: float = 2e-4
     vae_kl_weight: float = 1e-4
-    vae_temporal_weight: float = 2.0
+    vae_temporal_weight: float = 10.0
+    vae_temporal_form: str = "motion_weighted"
+    vae_temporal_relative: bool = True
     # dit
     dit_steps: int = 400
     dit_lr: float = 2e-4
@@ -143,7 +145,11 @@ def train_vae(cfg: TrainConfig, bundle: ModelBundle, device: torch.device, data:
         video, _ = data.batch(cfg.batch_size)
         video = video.to(device)
         loss, metrics = bundle.vae.recon_loss(
-            video, kl_weight=cfg.vae_kl_weight, temporal_weight=cfg.vae_temporal_weight
+            video,
+            kl_weight=cfg.vae_kl_weight,
+            temporal_weight=cfg.vae_temporal_weight,
+            temporal_relative=cfg.vae_temporal_relative,
+            temporal_form=cfg.vae_temporal_form,
         )
         opt.zero_grad(set_to_none=True)
         loss.backward()

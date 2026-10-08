@@ -182,74 +182,93 @@ a property of the code, not of a README sentence.
 
 ---
 
-## The one thing that does not work yet: the demo model does not move
+## Getting the clip to move: four bugs, in the order they had to be found
 
-Stated here rather than buried, because it is the most important thing to know
-before you extend this project.
+The first demo checkpoint generated one frame and repeated it nine times. This
+section is the post-mortem, because every fix was found by measurement rather
+than by reasoning, and three of the four fixes were individually insufficient.
 
-**Symptom.** The demo checkpoint generates a single frame and repeats it. Measured
-frame-to-frame delta on the output: `0.0` to `3e-4`, against `1e-2` to `3e-2` in
-the training clips. It is a video that does not move.
+**Symptom.** Frame-to-frame delta on the output: `0.0` to `3e-4`, against
+`1e-2`…`3e-2` in the training clips. It is a video that does not move.
 
-**It is not an architecture bug.** Three checks:
+**First, prove it is not the architecture.** Overfit *four* clips for 600 steps —
+if the model cannot memorise motion, nothing about data or schedule will help.
+It could not: `motion` stayed pinned at exactly `1.0000` and the reconstruction
+frame delta at exactly `0.0000`. Overfitting is the right first experiment
+because it removes capacity and generalisation from the list of suspects.
 
-1. A randomly initialised decoder fed a time-varying latent *does* produce
-   non-zero temporal deltas (`0.0025` … `0.017`), so the temporal path through
-   interpolate → conv → norm is intact.
-2. The trained **encoder does** emit time-varying latents — but with the wrong
-   ratio: latent magnitude std **6.28** against a frame-to-frame delta of
-   **0.001–0.02**. It encodes "one big constant plus a whisper of motion".
-3. The decoder therefore faithfully reproduces a static frame, and the training
-   loss does not object enough to fix it.
+### Bug 1 — the decoder's receptive field pointed backwards
 
-**Root cause A: the per-frame norm erases per-frame contrast.** The decisive
-experiment: feed a trained decoder a latent that flips between +5 and −5 and
-compare output frames. With `norm_mode="frame"` the output frames are
-**bit-identical** — because normalising each frame independently removes exactly
-the per-frame mean and scale that the encoder was using to carry the motion.
-Switching the same code to `norm_mode="clip"` changes the identical-input case
-from a delta of `0.0` to `1e-4`…`4e-4`. So this is a *measurable* consequence of
-the causality fix, not a guess, and it is now a config switch
-(`vae.norm_mode`) with the trade-off documented in the class docstring:
+Measured with a gradient probe, `|∂ out[4] / ∂ latent[k]|`:
 
-| `norm_mode` | Per-frame contrast | Strict causality |
-|---|---|---|
-| `frame` (default) | discarded | yes |
-| `clip` | preserved | no — the causality test fails, streaming is unsafe |
+| decoder | ∂/∂latent[0] | ∂/∂latent[1] | ratio |
+|---|---|---|---|
+| causal (before) | 1670 | 31 | **144×** |
+| centred (after) | 3.29 | 3.25 | **1.0×** |
 
-**Root cause B: loss balance.** In a typical clip, frame-to-frame differences
-are 10–30× smaller than per-pixel contrast, so plain L1 is minimised by emitting
-the average frame repeated N times. Measured loss components on a trained batch:
-`l1 = 0.137`, `temporal = 0.024`. Even at a temporal weight of 2 the motion term
-contributes less than a quarter of the appearance term, so "be still" stays the
-cheaper strategy.
+Output frame 4 should be built from latent 1. It was dominated by latent 0 by two
+and a half orders of magnitude, because nearest-neighbour temporal upsampling
+followed by a *causal* convolution gives `out[4]` the taps
+`[latent0, latent0, latent1]`. With that skew, "copy the first latent and repeat"
+wins every reconstruction loss, which is exactly the frozen output.
 
-**What is in the code.** `recon_loss` now carries a temporal-gradient term
-(`|Δt rec − Δt video|`) because without it the collapse is not merely likely, it
-is optimal, and the training log prints the motion term (`motion=`) next to `l1`
-so the balance is visible while it trains.
+Fixed with `causal_decoder=False` and centred padding — which is what MiniMax-H3
+itself does (`causal_encoder: true, causal_decoder: false` in its VAE config).
+Regression test: `test_decoder_receptive_field_is_centred_on_its_own_latent`.
 
-**What was tried and did not work.** Raising the temporal weight to 25 does not
-rescue it: reconstruction L1 degrades from 0.14 to 0.65+ and the reconstruction
-stays static. `norm_mode="clip"` removes the bit-identical symptom but does not
-by itself make a 400-step model animate — root cause B is a training-budget
-problem, and it needs a bigger model, real video, and a motion-aware objective.
+### Bug 2 — per-frame normalisation erased per-frame contrast
 
-**What is still needed.** The things a real video VAE uses and that were
-deliberately left out of scope here:
+Feed a trained decoder a latent that flips between +5 and −5:
 
-- a temporal-adversarial or motion-consistency loss, which penalises a still
-  decoder without also penalising a correct one;
-- normalising the temporal term by the magnitude of motion actually present in
-  the batch, so the balance does not depend on the clip;
-- training at a resolution and length where motion occupies more than a handful
-  of latent frames (this demo runs at 64×64, i.e. a 3-frame latent timeline);
-- choosing `norm_mode="clip"` and giving up the streaming guarantee, if per-frame
-  contrast matters more than causality for your use.
+| `norm_mode` | output change |
+|---|---|
+| `frame` | **exactly 0.0** |
+| `clip` | `1e-4`…`4e-4` |
 
-The honest summary: **the codec and the denoiser are verified; the demo weights
-are not good enough to animate.** Everything in §3 through §5 of this document
-holds regardless, and nothing in the 8 GB analysis depends on this being fixed.
+Per-frame statistics remove exactly the per-frame mean and scale that an encoder
+will otherwise use to carry motion. The `frame` mode keeps strict causality; the
+`clip` mode does not. The demo uses `clip`; both are available and
+`test_clip_norm_mode_is_not_causal` documents the cost.
+
+### Bug 3 — loss weight was not the lever
+
+Raising the temporal weight 2 → 25 → 50 changed nothing: `motion` stayed at
+exactly `1.0000` in every case, and at weight 25 reconstruction L1 degraded from
+0.14 to 0.65+ for nothing.
+
+### Bug 4 — the actual cause: the temporal gradient lived on 4 % of the pixels
+
+In a video, most pixels sit on a static background. There `d_rec - d_ref` is
+*exactly* zero, so an unweighted temporal term has essentially no gradient where
+motion actually is. Measured gradient norms on the same batch: **L1 → 106, the
+temporal term → 0.59**, i.e. 180× weaker, despite being 4× the loss value. No
+weight could fix a gradient that was being cancelled.
+
+The fix is to weight each pixel by how much it actually moves,
+`Σ |d_ref| · (d_rec − d_ref)² / Σ |d_ref|`. Controlled comparison, same seed,
+25 steps, frame delta of the reconstruction:
+
+| temporal term | frame delta |
+|---|---|
+| L1 | 0.00000 |
+| MSE | 0.00000 |
+| Charbonnier | 0.00000 |
+| **motion-weighted** | **0.32210** |
+
+`recon_loss` implements this as `temporal_form="motion_weighted"` (the default),
+with `"l1"` and `"mse"` kept for ablation, and prints the `motion=` term next to
+`l1` in the training log so this can never be invisible again.
+
+### What is still missing
+
+- motion is now produced, but it is coarse: the demo's latent timeline is 3 frames
+  for a 9-frame clip, so it learns "the object is somewhere else next" rather
+  than smooth trajectories;
+- a real video VAE adds a temporal-adversarial or motion-consistency term and
+  trains on data where motion dominates the pixels — neither is in scope here;
+- `norm_mode="clip"` and `causal_decoder=False` together mean **the demo VAE is
+  not strictly causal**. The strict path is still available and tested; it is
+  just not the one that produces motion.
 
 
 ---

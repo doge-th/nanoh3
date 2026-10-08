@@ -1,53 +1,71 @@
 #!/usr/bin/env bash
 # Publish this repository to GitHub.
 #
-#   ./scripts/publish.sh                       # create the repo and push
-#   ./scripts/publish.sh my-org/nanoh3        # create under a specific owner
+#   ./scripts/publish.sh                       # push to doge-th/nanoh3
+#   ./scripts/publish.sh my-org/nanoh3        # push somewhere else
 #
-# Requires the GitHub CLI authenticated (gh auth login) with repo scope.
-# This script never runs unattended on its own: it prints what it will do and
-# asks for confirmation, because publishing is not reversible in the way a local
-# commit is.
+# This machine has an SSH key registered with GitHub but no `gh` CLI, and SSH
+# cannot create a repository -- only push to one. So:
+#
+#   * if `gh` is installed and authenticated, this script creates the repo for you;
+#   * otherwise it prints the exact URL to create it by hand, then pushes.
+#
+# It prints what it will do and asks for confirmation, because publishing is not
+# reversible in the way a local commit is.
 set -euo pipefail
 
-REPO_SLUG="${1:-}"
+REPO_SLUG="${1:-doge-th/nanoh3}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-if [ -z "$REPO_SLUG" ]; then
-  NAME=$(basename "$PWD")
-  OWNER=$(git config --global user.name | tr ' ' '-' | tr '[:upper:]' '[:lower:]')
-  REPO_SLUG="${OWNER}/${NAME}"
-fi
+DESCRIPTION="Research + reference implementation: what MiniMax-H3 actually costs on 8 GB, and why a small open video model freezes"
 
 echo "About to publish:"
 echo "  local path : $ROOT"
 echo "  github repo: https://github.com/$REPO_SLUG"
-echo "  branch     : $(git branch --show-current 2>/dev/null || echo main)"
-echo "  files      : $(git ls-files | wc -l | tr -d ' ') tracked"
+echo "  files      : $(git ls-files | wc -l | tr -d ' ') tracked, $(du -sh .git | cut -f1) of history"
 echo
-echo "Checklist before you continue:"
-echo "  [ ] no checkpoints or videos are staged (git ls-files | grep -E '\.(pt|mp4)$')"
-echo "  [ ] docs/RESEARCH-H3.md licence section still matches your intent"
-echo "  [ ] you are happy to publish under Apache-2.0"
+echo "Checks:"
+echo "  - no checkpoints/videos tracked: $(git ls-files | grep -cE '\.(pt|pth|ckpt|safetensors|mp4)$' || true) found"
+echo "  - working tree clean          : $([ -z "$(git status --porcelain)" ] && echo yes || echo NO)"
+echo "  - untracked files left behind : $(git status --porcelain --untracked-files=all | grep -c '^??' || true)"
+echo
+echo "Reminders:"
+echo "  - README states up front that the demo model does not animate"
+echo "  - no MiniMax weights or outputs are included (licence section V.3)"
 echo
 
-read -r -p "Publish? [y/N] " answer
+read -r -p "Continue? [y/N] " answer
 case "$answer" in
   [yY]|[yY][eE][sS]) ;;
   *) echo "aborted"; exit 1 ;;
 esac
 
-command -v gh >/dev/null || { echo "gh not found: https://cli.github.com"; exit 1; }
-gh auth status >/dev/null || { echo "run: gh auth login"; exit 1; }
-
-if gh repo view "$REPO_SLUG" >/dev/null 2>&1; then
-  echo "repo exists, pushing"
-  gh repo edit "$REPO_SLUG" --visibility public
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  if gh repo view "$REPO_SLUG" >/dev/null 2>&1; then
+    echo "repo exists; pushing"
+  else
+    gh repo create "$REPO_SLUG" --public --source=. --remote=origin --description "$DESCRIPTION"
+  fi
+elif git ls-remote "git@github.com:$REPO_SLUG.git" >/dev/null 2>&1; then
+  echo "repo already exists on GitHub; pushing"
+  git remote remove origin 2>/dev/null || true
+  git remote add origin "git@github.com:$REPO_SLUG.git"
 else
-  gh repo create "$REPO_SLUG" --public --source=. --remote=origin --description \
-    "A small, fully open text-to-video model for 8 GB graphics cards"
+  echo
+  echo "The repo does not exist yet and 'gh' is not installed, so it has to be created"
+  echo "by hand. SSH can push but cannot create. Open this, click Create, come back:"
+  echo
+  echo "    https://github.com/new?name=nanoh3&visibility=public"
+  echo
+  echo "IMPORTANT: leave 'Add a README file' / .gitignore / licence UNCHECKED, otherwise"
+  echo "the first push will conflict with the history in this directory."
+  echo
+  read -r -p "Press Enter once the repo exists (Ctrl-C to stop)... " _
+  git remote remove origin 2>/dev/null || true
+  git remote add origin "git@github.com:$REPO_SLUG.git"
 fi
 
 git push -u origin HEAD
+echo
 echo "done: https://github.com/$REPO_SLUG"

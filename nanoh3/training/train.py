@@ -46,6 +46,12 @@ class TrainConfig:
     vae_temporal_weight: float = 10.0
     vae_temporal_form: str = "motion_weighted"
     vae_temporal_relative: bool = True
+    # Curriculum for the temporal term: 0 until `ramp_start`, then linear to
+    # `vae_temporal_weight` at `ramp_end`. Single-phase runs flip between a
+    # good-appearance/still basin and a moving/broken one in one optimisation
+    # step; see docs/DESIGN.md for the measured matrix.
+    vae_temporal_ramp_start: int = 0
+    vae_temporal_ramp_end: int = 0
     # dit
     dit_steps: int = 400
     dit_lr: float = 2e-4
@@ -144,10 +150,20 @@ def train_vae(cfg: TrainConfig, bundle: ModelBundle, device: torch.device, data:
     for step in range(1, cfg.vae_steps + 1):
         video, _ = data.batch(cfg.batch_size)
         video = video.to(device)
+        if cfg.vae_temporal_ramp_end > 0:
+            if step < cfg.vae_temporal_ramp_start:
+                temporal_weight = 0.0
+            elif step >= cfg.vae_temporal_ramp_end:
+                temporal_weight = cfg.vae_temporal_weight
+            else:
+                span = max(1, cfg.vae_temporal_ramp_end - cfg.vae_temporal_ramp_start)
+                temporal_weight = cfg.vae_temporal_weight * (step - cfg.vae_temporal_ramp_start) / span
+        else:
+            temporal_weight = cfg.vae_temporal_weight
         loss, metrics = bundle.vae.recon_loss(
             video,
             kl_weight=cfg.vae_kl_weight,
-            temporal_weight=cfg.vae_temporal_weight,
+            temporal_weight=temporal_weight,
             temporal_relative=cfg.vae_temporal_relative,
             temporal_form=cfg.vae_temporal_form,
         )

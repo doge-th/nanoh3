@@ -134,9 +134,37 @@ technique. That is the entire reason this repository exists: the only way to
 | W4A4 SVDQuant | `QuantFunc/…-4bit` | 11.52 GiB; **3.2 s/step vs 8.5 s int8 on a 4090** |
 | NVFP4 | `lilcheaty/…` | 11.67 GiB; −8.0 GB VRAM, −12.4 % time vs int8 |
 | Turbo LoRAs (4/8 NFE) | `lightx2v`, `larryvrh` | the main speed lever |
-| PDMD 2-NFE / 4-NFE | `Iwannapose/…` | fastest H3 mode in existence, **zero published timings** |
+| PDMD 2-NFE / 4-NFE | `Iwannapose/…`, `Kijai/MiniMax-H3-experimental/loras` | fastest H3 mode in existence, **zero published timings** |
 | Learned 10 %-attention predictor | `Veda-Sparse/…` | 3.12× end-to-end on a PRO 6000, 1.77–2.82× on a 4090 |
 | GGUF Q2_K | `unsloth/…` | 6.26 GiB — the only denoiser that fits *inside* 8 GB, **never benchmarked at 8 GB** |
+
+### A Chinese deployment guide, cross-checked
+
+A widely-shared WeChat guide covers exactly this ground: Kijai's PDMD
+`2-step rank 38 (381 MB)` and `4-step rank 57 (559 MB)` LoRAs, deployed through
+ComfyUI with a pruned W4A8/W6A8 backbone, an int8-convrot video VAE and an NVFP4
+text encoder. **Its file sizes cross-check against the HF tree** — 381 MB vs the
+0.36 GiB `pdmd_2step_rank-38` file, 559 MB vs the 0.52 GiB `pdmd_4step_rank-57`
+file — so the guide is describing real artefacts, not vapour. Its tuning red
+lines also match the official docs independently: steps must equal the LoRA's
+step count, and CFG stays at 1.0–1.5 because the weights are guidance-distilled.
+
+Its card-by-card table is the useful part, and it is worth reading as a *tier
+map* rather than a performance claim:
+
+| Tier in the guide | Cards | Its own verdict |
+|---|---|---|
+| 12 GB | 5070 / 4070 / 3060 / 3080 12 GB | "核心受惠区" — the tier the recipe is designed for |
+| 16 GB | 4070 Ti S / 4080 / 5080 / 4060 Ti 16 GB | native 768p |
+| 24 GB | 3090 / 4090 / 5090 | full-fat |
+| **8–10 GB** | 4060 8 GB / 3070 / 3080 10 GB | **"极客折腾梯队"** — requires extreme CPU/GPU slicing, and it warns of system-memory swapping |
+
+So the guide's own framing puts **8 GB in the tinker tier, below the 12 GB tier it
+was written for** — which matches the measured 14.3-minute 8 GB run in the table
+above. Its headline speed claim is "12 GB, 960×544, 5 s, down to tens of seconds"
+with the 2-step LoRA; note that is 12 GB and a 5-second clip, and the guide gives
+no GPU model, no seed count and no per-step figure to check it against. Nothing
+in it produces "8 GB, under a minute".
 
 Real per-step cost, best available public data:
 

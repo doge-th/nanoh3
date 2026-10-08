@@ -261,14 +261,62 @@ with `"l1"` and `"mse"` kept for ablation, and prints the `motion=` term next to
 
 ### What is still missing
 
-- motion is now produced, but it is coarse: the demo's latent timeline is 3 frames
-  for a 9-frame clip, so it learns "the object is somewhere else next" rather
-  than smooth trajectories;
-- a real video VAE adds a temporal-adversarial or motion-consistency term and
-  trains on data where motion dominates the pixels — neither is in scope here;
-- `norm_mode="clip"` and `causal_decoder=False` together mean **the demo VAE is
-  not strictly causal**. The strict path is still available and tested; it is
-  just not the one that produces motion.
+See the next section: the motion objective works, and the remaining wall is
+capacity, not formulation.
+
+---
+
+## The measured wall: appearance and motion do not coexist at this size
+
+Everything above fixed a *bug*. What remains is not a bug: for the demo VAE
+(2.7 M parameters, 64×64, a 3-frame latent timeline, 256 synthetic clips) there
+is **no operating point that has both good reconstruction and real motion**.
+Measured, same seed, scored against the two criteria (`L1 < 0.25`,
+`motion ratio ≥ 0.5`):
+
+| Temporal objective | Weight | Schedule | recon L1 | motion ratio | verdict |
+|---|---|---|---|---|---|
+| none | 0 | constant | **0.05** | 0.00 | good picture, perfectly still |
+| motion-weighted (pixel) | 1 | constant | **0.03–0.16** | 0.00 | good picture, perfectly still |
+| motion-weighted (pixel) | 1 | constant, **4.7× more motion in the data** | **0.17** | 0.00 | good picture, perfectly still |
+| motion-weighted (pixel) | 3 | constant | 0.66 | 10–20× | moves, picture broken |
+| motion-weighted (pixel) | 5 | constant | 0.57 | 0.9–1.3× | right amount of motion, picture broken |
+| motion-weighted (pixel) | 10 | constant | 0.98 | 30× | broken |
+| motion-weighted (pixel) | 5 | LR cosine decay | 0.57 | 0.9–1.3× | picture broken |
+| motion-weighted (pixel) | 5 | two-phase, warm start @ 3e-5 | 1.31 | 0.03 → 0.32 | broken |
+| cosine (direction only) | 3 | constant | **0.09–0.15** | 0.00 | good picture, still |
+| coarse, 4× pooled | 3 | LR decay | **0.05** | 0.00 | good picture, still |
+| coarse, 8× pooled | 8 | LR decay | **0.06** | 0.01 | good picture, still |
+
+Eleven configurations spanning four loss formulations, two downsampling orders,
+three weights, learning-rate decay, a two-phase curriculum, and a 4.7× increase in
+the amount of motion in the training data. The pattern never breaks: **either L1
+is good and the motion is exactly zero, or the motion is present and L1 is
+0.6–1.7.** The transition happens inside a single optimisation step, so no weight
+lands between the two attractors.
+
+**Why.** The pixel-exact temporal target is *unreachable* at this capacity — a
+blur satisfies L1 cheaply but cannot satisfy an exact frame-to-frame match, so
+the optimiser abandons the achievable objective to chase the impossible one. The
+coarse and cosine objectives fix precisely that (achievable targets keep L1 at
+0.05–0.15) and then stop discriminating: at that granularity a copied frame is
+close enough to pass. The failure moves rather than disappearing.
+
+**What this means for the rest of the project.**
+
+- The motion *mechanism* is fixed and proven: §"Getting the clip to move" removes
+  four separate causes of a frozen clip, and the end-to-end generated video went
+  from a frame delta of `0, 0, 0, 5e-5…` to `4.6e-4, 1.2e-3, 1.5e-3…`.
+- The remaining gap is **capacity, resolution and real data**, not loss design.
+  `configs/8gb.yaml` (≈300 M) with real video and a GPU is where this should be
+  retried; the curriculum knobs (`vae_temporal_ramp_start/end`) are in the trainer
+  ready for it.
+- Until then the demo config runs the temporal term at weight 1.0, which is the
+  best honest compromise: perfect reconstruction, a trace of motion, no broken
+  pictures.
+
+`scripts/eval_demo.py` scores any checkpoint against those two criteria and
+exits non-zero when it fails, so this stays a measurement rather than a story.
 
 
 ---

@@ -32,7 +32,23 @@ BACKGROUNDS: dict = {
     "cream": (0.90, 0.88, 0.80),
 }
 SHAPES = ("circle", "square", "triangle")
-MOTIONS = ("still", "right", "left", "up", "down", "zoom", "pulse")
+MOTIONS = (
+    "still",
+    "right",
+    "left",
+    "up",
+    "down",
+    "zoom",
+    "pulse",
+    # Camera motion: a pan translates the *whole frame*, so the temporal gradient
+    # is large across every pixel instead of only at a small object's edges.
+    # Real video is full of this; a small shape drifting on a flat background is
+    # close to the worst case a video model can be handed, and it is what made
+    # the demo VAE collapse to a still image.
+    "pan_right",
+    "pan_left",
+    "sweep",
+)
 
 
 @dataclass(frozen=True)
@@ -44,16 +60,22 @@ class ClipSpec:
     size: float
 
     def prompt(self) -> str:
-        motion = {
-            "still": "stays still",
-            "right": "moves to the right",
-            "left": "moves to the left",
-            "up": "moves upward",
-            "down": "moves downward",
-            "zoom": "grows larger",
-            "pulse": "pulses in size",
-        }[self.motion]
-        return f"a {self.color} {self.shape} on a {self.background} background that {motion}"
+        if self.motion == "pan_right":
+            clause = "while the camera pans right"
+        elif self.motion == "pan_left":
+            clause = "while the camera pans left"
+        else:
+            clause = "that " + {
+                "still": "stays still",
+                "right": "moves to the right",
+                "left": "moves to the left",
+                "up": "moves upward",
+                "down": "moves downward",
+                "zoom": "grows larger",
+                "pulse": "pulses in size",
+                "sweep": "sweeps across the frame",
+            }[self.motion]
+        return f"a {self.color} {self.shape} on a {self.background} background {clause}"
 
 
 def random_specs(count: int, seed: int = 0) -> List[ClipSpec]:
@@ -68,7 +90,7 @@ def random_specs(count: int, seed: int = 0) -> List[ClipSpec]:
             shape=SHAPES[rng.randrange(len(SHAPES))],
             motion=MOTIONS[rng.randrange(len(MOTIONS))],
             background=bgs[rng.randrange(len(bgs))],
-            size=round(rng.uniform(0.16, 0.34), 3),
+            size=round(rng.uniform(0.22, 0.46), 3),
         )
         for _ in range(count)
     ]
@@ -87,6 +109,17 @@ def _shape_mask(shape: str, ys: Tensor, xs: Tensor, cx: Tensor, cy: Tensor, r: T
     raise ValueError(f"unknown shape {shape!r}")
 
 
+def _stripe_pattern(size: int, period: int, offset: float) -> Tensor:
+    """A repeating vertical stripe pattern, used to make a camera pan visible.
+
+    A pan of a *flat* background is invisible, so camera-motion clips are drawn
+    with stripes: shifting them produces a temporal gradient across the entire
+    frame, which is exactly the signal the demo VAE was failing to learn.
+    """
+    xs = torch.linspace(0.0, 1.0, size)
+    return ((xs * (size / period) + offset).floor() % 2).to(torch.bool)
+
+
 def render_clip(spec: ClipSpec, frames: int, size: int = 64) -> Tensor:
     """Render one clip to (3, frames, size, size) in [-1, 1]."""
     device = torch.device("cpu")
@@ -94,6 +127,7 @@ def render_clip(spec: ClipSpec, frames: int, size: int = 64) -> Tensor:
     xs = torch.linspace(-1, 1, size, device=device)[None, :].expand(size, size)
     color = torch.tensor(COLORS[spec.color], device=device).view(3, 1)
     bg = torch.tensor(BACKGROUNDS[spec.background], device=device).view(3, 1, 1)
+    panning = spec.motion in ("pan_right", "pan_left")
     out = torch.empty(3, frames, size, size, device=device)
     for f in range(frames):
         p = f / max(frames - 1, 1)
@@ -110,8 +144,17 @@ def render_clip(spec: ClipSpec, frames: int, size: int = 64) -> Tensor:
             r = spec.size * (0.5 + p)
         elif spec.motion == "pulse":
             r = spec.size * (0.75 + 0.45 * math.sin(p * math.pi * 2.0))
+        elif spec.motion == "sweep":
+            cx = -0.7 + 1.4 * p
+            cy = 0.35 * math.sin(p * math.pi)
         mask = _shape_mask(spec.shape, ys, xs, torch.tensor(cx), torch.tensor(cy), torch.tensor(r))
         frame = bg.expand(3, size, size).clone()
+        if panning:
+            shift = (0.6 - 1.2 * p) if spec.motion == "pan_left" else (-0.6 + 1.2 * p)
+            stripes = _stripe_pattern(size, period=6, offset=shift * 3.0)
+            n = int(stripes.sum())
+            tint = color.view(3, 1, 1).expand(3, size, n)
+            frame[:, :, stripes] = frame[:, :, stripes] * 0.35 + tint
         frame[:, mask] = color.expand(3, int(mask.sum()))
         out[:, f] = frame
     return out * 2.0 - 1.0
